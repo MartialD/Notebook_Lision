@@ -1,0 +1,1075 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "db070239",
+   "metadata": {},
+   "source": [
+    "# <center> L-TEM analysis of Magnetic Samples with MTIE</center>"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "86c1186c",
+   "metadata": {},
+   "source": [
+    "This code will align the different images of magnetic samples captured using Lorentz microscopy (underfocus, infocus and overfocus) and calculates the magnetization of the sample using the transport of intensity equation (TIE)\n",
+    "\n",
+    "author: Dr. Joseph Vas & Prof. Martial Duchamp"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "52f44c1f",
+   "metadata": {},
+   "source": [
+    "This code is developed based on the MTIE equation for quantifying magnetic domains measured using Lorentz TEM in a JEOL ARM 300 double corrected microscope in a field free conditions by switching off the objective lens. The image focus is done by the loretz lens available with the image corrector. The probe corrector is switched off except for the lens responsible for correcting the 2 and 3 stig.\n",
+    "\n",
+    "The main reference for the algorithm is given below. \n",
+    "<br>[1] V.V Volkov, Y Zhu, Lorentz phase microscopy of magnetic materials, Ultramicroscopy, Volume 98, Issues 2–4, 2004,pp. 271-281, ISSN 0304-3991,https://doi.org/10.1016/j.ultramic.2003.08.026.\n",
+    "<br>[2] https://learnopencv.com/image-alignment-ecc-in-opencv-c-python/\n",
+    "\n",
+    "The formulation for the MTIE is given in [1].\n",
+    "\n",
+    "The key equations for the calculation are\n",
+    "\n",
+    "\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1bbc73ab",
+   "metadata": {},
+   "source": [
+    "1. $\\phi(r) = F^{-1}[F(k_{z}\\delta_{z}I/I)/k_\\bot^{2}]$\n",
+    "2. $t{B} = \\frac{\\hbar}{e}[n_{z}\\times \\Delta\\phi]$"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "92ab8599",
+   "metadata": {},
+   "source": [
+    "The algorithm used will be as follows,\n",
+    "<br>(1) Import the 3 images - under focus, in focus and over focus images\n",
+    "<br>(2) calculating the homography transform matrix of the underfocus and overfocus images with respect to the infocus image and aligning the out of focus images to the in-focus image\n",
+    "<br>(3) masking the areas with large fresnal frignes to eliminate spurious results\n",
+    "<br>(4) calculating the phase shift to the electron wave due to magnetic fields of the sample using equation 1.\n",
+    "<br>(5) calculating the magnetic field from the phase shift using equation 2.\n",
+    "<br>(6) Overlaying the field vectors on the in-phase images"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1a55f576",
+   "metadata": {},
+   "source": [
+    "## <center>This version of the code is optimized for working with Lorentz images with only 1 defocus </center>"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "176d88eb",
+   "metadata": {},
+   "source": [
+    "<ins>Step 1</ins>. Importing the different dm4 images - underfocus, infocus and overfocus"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "13011666",
+   "metadata": {},
+   "source": [
+    "<ins>importing relevant python libraries</ins>"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "038fc8ae",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import matplotlib.pyplot as plt\n",
+    "import matplotlib as mpl\n",
+    "import numpy as np\n",
+    "import cv2\n",
+    "from scipy  import ndimage\n",
+    "import math\n",
+    "from scipy import ndimage"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "46d0a0f4",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Populating the interactive namespace from numpy and matplotlib\n"
+     ]
+    }
+   ],
+   "source": [
+    "%pylab qt"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "6e80de19",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import hyperspy.api as hs"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "d6c66c1c",
+   "metadata": {},
+   "source": [
+    "<ins>importing the in-focus and out of the focus images collected in L-TEM</ins>"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "381861ca",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "TEM1 = hs.load('1.dm4') #underfocus\n",
+    "TEM2 = hs.load('2.dm4') #in-focus"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "126b76ac",
+   "metadata": {},
+   "source": [
+    "<ins>Step 2.</ins> Calculating the homography transform matrix of the underfocus and overfocus images with respect to the infocus image and aligning the out of focus images to the in-focus image.\n",
+    "<br> Before the phase information and the fields can be calculated from the L-TEM images, the artifacts brought in due to the defocus needs to be calculated. This is done by calculating the transforamtion- homography which takes into account the translation, rotation and sheer transformations due to the defocus. Another defocus effect is the introduction of fresnal fringes at the edges of the samples. This cannot be easily removed and thus is ignored.\n",
+    "\n",
+    "<br>Before the transforms can be done, in-order to reduce the processing time, the images need to be binned down. This is written as a separate function"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "id": "d67010f6",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "rebin_order = 8 #the order by which the size is to be binned\n",
+    "bin_sizex = TEM1.data.shape[0]/rebin_order\n",
+    "bin_sizey = TEM1.data.shape[1]/rebin_order\n",
+    "\n",
+    "under_focus = TEM1.rebin([bin_sizex,bin_sizey])\n",
+    "in_focus = TEM2.rebin([bin_sizex,bin_sizey])\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "74a28150",
+   "metadata": {},
+   "source": [
+    "<ins>aligning the images with respect to the in-focus image</ins>\n",
+    "\n",
+    "<br> The transformation matrix is calculated in 2 stages, the first one to find the translation between the images. Once the translation is corrected, the rotation and sheer of the images are corrected for using the homography transform."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "d16eb005",
+   "metadata": {},
+   "source": [
+    "This function is used to calculate the translation, rotation and sheer transformation between the in-focus image and out of focus images"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "21caaeb1",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def align2d_cv(template_original,image_original,warp_mode): #function for calculating the alignments\n",
+    "    \n",
+    "    template = template_original.copy()\n",
+    "    image = image_original.copy()\n",
+    "\n",
+    "    template_mean = np.mean(template)\n",
+    "    image_mean = np.mean(image)\n",
+    "\n",
+    "    template[template>template_mean] = template_mean\n",
+    "    image[image>image_mean] = image_mean\n",
+    "\n",
+    "    template[template<template_mean] = 0\n",
+    "    image[image<image_mean] = 0\n",
+    "\n",
+    "    temp = cv2.normalize(template, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)\n",
+    "    imag = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)\n",
+    "    \n",
+    "    #find the shape\n",
+    "    sz = image.shape\n",
+    "\n",
+    "    #defining the mask\n",
+    "    mask = temp.copy()\n",
+    "    #mask_mean = np.mean(mask)\n",
+    "    #mask[mask>0.9*mask_mean] = 1\n",
+    "    #mask[mask<0.9*mask_mean] = 0\n",
+    "\n",
+    "    mask[:,:] = 1\n",
+    "    mask[0,0] = 0\n",
+    "    \n",
+    "    \n",
+    "    if warp_mode == cv2.MOTION_HOMOGRAPHY :\n",
+    "        warp_matrix = np.eye(3, 3, dtype=np.float32)\n",
+    "    else :\n",
+    "        warp_matrix = np.eye(2, 3, dtype=np.float32)\n",
+    "          \n",
+    "     # Specify the number of iterations.\n",
+    "    number_of_iterations = 3000;\n",
+    "    \n",
+    "    # Specify the threshold of the increment\n",
+    "    termination_eps = 1e-10;\n",
+    "    \n",
+    "    # Define termination criteria\n",
+    "    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, number_of_iterations,  termination_eps)\n",
+    "\n",
+    "    # Run the ECC algorithm. The results are stored in warp_matrix.\n",
+    "    (cc, warp_matrix) = cv2.findTransformECC(temp,imag,warp_matrix, warp_mode, criteria,mask,gaussFiltSize = 5)\n",
+    "    \n",
+    "    if warp_mode == cv2.MOTION_HOMOGRAPHY :\n",
+    "        # Use warpPerspective for Homography \n",
+    "        im2_aligned = cv2.warpPerspective (image_original, warp_matrix, (sz[1],sz[0]), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)\n",
+    "    else :\n",
+    "        # Use warpAffine for Translation, Euclidean and Affine\n",
+    "        im2_aligned = cv2.warpAffine(image_original, warp_matrix, (sz[1],sz[0]), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP);\n",
+    "\n",
+    "    return(im2_aligned)      "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "id": "362d834d",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "under_focus_translated = align2d_cv(in_focus.data, under_focus.data, cv2.MOTION_TRANSLATION)\n",
+    "under_focus_affined = align2d_cv(in_focus.data, under_focus_translated, cv2.MOTION_HOMOGRAPHY)\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "id": "c96ca802",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "vmin_mul = 0.\n",
+    "vmax_mul = 2.5"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1e3ea26b",
+   "metadata": {},
+   "source": [
+    "<ins>Plotting to check the alignments</ins>"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "id": "8165fc00-52c5-4a85-bac2-6fe963682494",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<matplotlib.image.AxesImage at 0x7fc420490790>"
+      ]
+     },
+     "execution_count": 10,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "fig, ax = plt.subplots(nrows = 1, ncols= 3)\n",
+    "image =under_focus_affined\n",
+    "ax[0].imshow(image, cmap='gray', \\\n",
+    "                 vmin=vmin_mul*np.mean(image), vmax=vmax_mul*np.mean(image))\n",
+    "ax[0].set_title('under_focus')\n",
+    "\n",
+    "image =in_focus.data\n",
+    "ax[1].imshow(image, cmap='gray', \\\n",
+    "                 vmin=vmin_mul*np.mean(image), vmax=vmax_mul*np.mean(image))\n",
+    "ax[1].set_title('in_focus')\n",
+    "ax[2].set_title('difference')\n",
+    "\n",
+    "image =in_focus.data-under_focus_affined\n",
+    "ax[2].imshow(image, cmap='gray', \\\n",
+    "                 vmin=vmin_mul*np.mean(image), vmax=vmax_mul*np.mean(image))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "17036617",
+   "metadata": {},
+   "source": [
+    "<ins>Step 3.</ins> Creating the mask containing the region of interest\n",
+    "<br> Three things need to be done for a good mask. <br>(1) Remove the high frequency noise within the region of interest. This is done by fft filtering here. <br>(2) Remove the outer edges which are not of interest to the study. This is done by using a rectangle to cut off that region. <br>(3) remove a buffer layer from the edge to remove the areas influenced by fresnal fringes"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "id": "ed0b797e",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<matplotlib.image.AxesImage at 0x7fc4393bcf70>"
+      ]
+     },
+     "execution_count": 11,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "mask = in_focus.deepcopy()\n",
+    "mask_mean = np.mean(mask.data)\n",
+    "\n",
+    "fig, ax = subplots(nrows = 2, ncols = 2)\n",
+    "ax[0,0].imshow(mask.data,cmap = 'gray')\n",
+    "\n",
+    "mask.data[mask.data<0.98*mask_mean] = 1  \n",
+    "mask.data[mask.data>0.98*mask_mean] = 0\n",
+    "\n",
+    "ax[0,1].imshow(mask.data,cmap = 'gray')\n",
+    "\n",
+    "#building the fft filter to eliminate the high frequency noise\n",
+    "Y = (np.fft.fftshift(np.fft.fft2(mask.data)))\n",
+    "circle = np.zeros([Y.shape[0],Y.shape[1]])\n",
+    "\n",
+    "for i in range(0,circle.shape[0]):\n",
+    "    for j in range(0,circle.shape[1]):\n",
+    "        if np.sqrt((float(i)-(circle.shape[0]/2))**2+(float(j)-(circle.shape[1]/2))**2)< circle.shape[0]/3:\n",
+    "            circle[i,j] = 1\n",
+    "            \n",
+    "filtered_Y = (circle*Y)\n",
+    "filtered_mask = abs(np.fft.ifft2(np.fft.ifftshift(filtered_Y)))\n",
+    "mask.data = filtered_mask\n",
+    "\n",
+    "mask_mean = np.mean(mask.data)\n",
+    "mask.data[mask.data<0.9*mask_mean] = 0\n",
+    "mask.data[mask.data>0.9*mask_mean] = 1\n",
+    "\n",
+    "ax[1,0].imshow(mask.data,cmap = 'gray')\n",
+    "\n",
+    "#removing the box from the edge\n",
+    "\n",
+    "theta = 11 #in degrees\n",
+    "c1y =-25 # left vertical line\n",
+    "c2y = 440 # right vertical line\n",
+    "c3x = 100 # left horizondal line\n",
+    "c4x = 405 # left horizondal line\n",
+    "\n",
+    "for i in range(0,circle.shape[0]):\n",
+    "    for j in range(0,circle.shape[1]):\n",
+    "        y = j-(tan(theta*pi/180)*i+c1y)\n",
+    "        if y<0:\n",
+    "            #print(y)\n",
+    "            mask.data[i,j] = 0\n",
+    "        y = j-(tan(theta*pi/180)*i+c2y)\n",
+    "        if y>0:\n",
+    "            #print(y)\n",
+    "            mask.data[i,j] = 0  \n",
+    "        y = i-((1/tan(-(90-theta)*pi/180))*j+c3x)\n",
+    "        if y<0:\n",
+    "            #print(y)\n",
+    "            mask.data[i,j] = 0\n",
+    "        y = i-((1/tan(-(90-theta)*pi/180))*j+c4x)\n",
+    "        if y>0:\n",
+    "            #print(y)\n",
+    "            mask.data[i,j] = 0\n",
+    "#ax[2].imshow(mask.data,cmap = 'gray')    \n",
+    "\n",
+    "#removing the fringes at edges\n",
+    "\n",
+    "diff = abs(np.gradient(mask.data,axis =0))\n",
+    "#ax[1,0].imshow(diff,cmap = 'gray')\n",
+    "\n",
+    "diff_2=ndimage.uniform_filter(diff, size=10, mode='constant')\n",
+    "diff_2_mean = np.mean(diff_2)\n",
+    "diff_2[diff_2>0.6*diff_2_mean] = 1\n",
+    "\n",
+    "\n",
+    "mask.data = mask.data - diff_2\n",
+    "mask.data[mask.data<0] = 0\n",
+    "ax[1,1].imshow(mask.data,cmap = 'gray')\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "id": "d3637cd7",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "pixel_dimensions = 18.747e-9*in_focus.original_metadata.ImageList.TagGroup0.ImageData.Calibrations.Dimension.TagGroup0.Scale*rebin_order"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "id": "c14439b5",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "1.8939607664465904e-08"
+      ]
+     },
+     "execution_count": 14,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "pixel_dimensions"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "105e3b6f",
+   "metadata": {},
+   "source": [
+    "<ins>Step 4.</ins> Calculating the phase of the wave due to magnetic sample. \n",
+    "<br>Since we need to find the log of the intensity difference, having zero intensity in the data creates singularities. This has to be corrected before calculating the log.\n",
+    "\n",
+    "<br>The calculating involves constants which can depend on the accelarating voltage which needs to be corrected for relativistic effects. One of the important constants is the defocus used for the measurements. This needs to be inputted."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "id": "2bf7c28e",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#preventing singularity while taking log\n",
+    "under_focus_affined = under_focus_affined +0.001\n",
+    "in_focus_data = in_focus.data + 0.001\n",
+    "\n",
+    "average_intensity = (under_focus_affined+in_focus_data)/2\n",
+    "\n",
+    "#need to change with actual change of focus\n",
+    "df = 3000e-9*5e3 \n",
+    "\n",
+    "#constants to be inputted\n",
+    "h = 6.626e-34\n",
+    "m = 9.1e-31\n",
+    "electron_charge = 1.6e-19\n",
+    "V = 388.06e3 # accelarating voltage corrected for relativistic effects\n",
+    "lamda = h/math.sqrt(2*m*electron_charge*V)\n",
+    "kz = 2*pi/lamda #this is for vacuum since the wave transformation between under focus and overfocus is in vacuum\n",
+    "t = 5e-9, #thickness of the sample\n",
+    "\n",
+    "#calculating the part of equation 1 which will be FFTed\n",
+    "dz_logI = (under_focus_affined-in_focus_data)/(average_intensity*df)\n",
+    "#dz_logI = (log_over-log_under)/(df)\n",
+    "#dz_logI[mask.data<0.2] = 0 #applying mask\n",
+    "#dz_logI[dz_logI==0] = 1/kz\n",
+    "\n",
+    "fft_dI = np.fft.fft2(kz*dz_logI)\n",
+    "fft_dI_shift = np.fft.fftshift(fft_dI)\n",
+    "\n",
+    "#finding the k space vectors\n",
+    "pixel_dimensions = 18.747e-9*in_focus.original_metadata.ImageList.TagGroup0.ImageData.Calibrations.Dimension.TagGroup0.Scale*rebin_order\n",
+    "field_of_view = dz_logI.shape[0]*pixel_dimensions\n",
+    "#pixel_dimensions = 1\n",
+    "\n",
+    "FreqCompRows = np.fft.fftfreq(dz_logI.shape[0],d=pixel_dimensions)\n",
+    "FreqCompCols = np.fft.fftfreq(dz_logI.shape[1],d=pixel_dimensions)\n",
+    "\n",
+    "\n",
+    "k_perp1 = zeros(dz_logI.shape)\n",
+    "\n",
+    "for i in range(0,k_perp1.shape[0]):\n",
+    "    for j in range(0,k_perp1.shape[1]):\n",
+    "        k_perp1[i,j]= np.sqrt(FreqCompRows[i]*FreqCompRows[i]+FreqCompCols[j]*FreqCompCols[j])\n",
+    "        #if k_perp[i,j]< 1e6:\n",
+    "            #k_perp[i,j] = inf\n",
+    "\n",
+    "#k_perp1[0,0] = 0.5e5 #removing the singularity caused when k_perp becomes 0\n",
+    "k_perp = np.fft.fftshift(k_perp1)+np.max(k_perp1)/0.5e2 # use a sufficiently small number to avoid the low frequency noise \n",
+    "#k_perp[k_perp<5e5] = 5e5\n",
+    "fft_part = (fft_dI_shift/(k_perp**2))\n",
+    "\n",
+    "#calculalating the phase of the wave when passing throught the sample\n",
+    "phi_crop = abs(np.fft.ifft2(np.fft.ifftshift(fft_part)))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 32,
+   "id": "38945e81",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "/var/folders/fz/hslxnj6x7pg9scd9025ggjq00000gn/T/ipykernel_2851/3781148640.py:1: RuntimeWarning: divide by zero encountered in log10\n",
+      "  np.log10(k_perp1)\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "array([[      -inf, 5.01335906, 5.31438906, ..., 5.49048032, 5.31438906,\n",
+       "        5.01335906],\n",
+       "       [5.01335906, 5.16387406, 5.36284406, ..., 5.51335906, 5.36284406,\n",
+       "        5.16387406],\n",
+       "       [5.31438906, 5.36284406, 5.46490405, ..., 5.57033074, 5.46490405,\n",
+       "        5.36284406],\n",
+       "       ...,\n",
+       "       [5.49048032, 5.51335906, 5.57033074, ..., 5.64099531, 5.57033074,\n",
+       "        5.51335906],\n",
+       "       [5.31438906, 5.36284406, 5.46490405, ..., 5.57033074, 5.46490405,\n",
+       "        5.36284406],\n",
+       "       [5.01335906, 5.16387406, 5.36284406, ..., 5.51335906, 5.36284406,\n",
+       "        5.16387406]])"
+      ]
+     },
+     "execution_count": 32,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "np.log10(k_perp1)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "952d3286",
+   "metadata": {},
+   "source": [
+    "Plotting phase"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 33,
+   "id": "28d602a4-2ca2-4af2-8383-1c16ac18bdba",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<matplotlib.image.AxesImage at 0x7fc43ad5a2e0>"
+      ]
+     },
+     "execution_count": 33,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "vmin_mul = 0.\n",
+    "vmax_mul = 2.5\n",
+    "\n",
+    "fig, ax = plt.subplots(nrows = 1, ncols= 2)\n",
+    "image1 =abs(phi_crop)\n",
+    "#image2 = k_perp\n",
+    "image2 = abs(fft_part)\n",
+    "ax[0].set_title('Phase of the electron')\n",
+    "ax[0].imshow(log10(image1), cmap='gray', \\\n",
+    "                 vmin=vmin_mul*np.mean(image1), vmax=vmax_mul*np.mean(image1))\n",
+    "ax[1].imshow(image2, cmap='gray', \\\n",
+    "                 vmin=vmin_mul*np.mean(image2), vmax=vmax_mul*np.mean(image2))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "2b3e7451",
+   "metadata": {},
+   "source": [
+    "<ins>Step 5.</ins> Calculating the magnetic information within the sample using equation 2\n",
+    "<br>The code gives the cumulative magnetic moment inside the sample"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "9b762a9d",
+   "metadata": {},
+   "source": [
+    "Calculates the X gradient and Y gradient of the image"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 18,
+   "id": "984d7bcc",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def gradients(image,pixel_size):\n",
+    "    dim = image.shape\n",
+    "    grad_X = np.zeros((dim[0],dim[1]))\n",
+    "    grad_Y = np.zeros((dim[0],dim[1]))\n",
+    "    for i in range (0,dim[0]-1):\n",
+    "        for j in range (0,dim[1]-1):\n",
+    "            grad_X[i,j] =(image[i,j+1]-image[i,j])/pixel_size\n",
+    "            grad_Y[i,j] =-(image[i+1,j]-image[i,j])/pixel_size\n",
+    "    \n",
+    "    return(grad_X,grad_Y)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 19,
+   "id": "aeba0929",
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [],
+   "source": [
+    "coeff = h/(2*pi*electron_charge)\n",
+    "(grad_X,grad_Y) = gradients(phi_crop,pixel_dimensions)\n",
+    "\n",
+    "Bx = coeff*grad_Y/t\n",
+    "By = -coeff*grad_X/t\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "73bf477c",
+   "metadata": {},
+   "source": [
+    "<ins>Step 6.</ins> Plotting the magnetic map within the specimen"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 20,
+   "id": "56c02ffc",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "angle = 84*np.pi/180\n",
+    "Bx_real = Bx*np.cos(angle)-By*cos(np.pi/2 -angle)\n",
+    "By_real = Bx*np.sin(angle)+By*sin(np.pi/2 -angle)\n",
+    "Bxreal_masked = np.ma.masked_where(mask.data < 1,Bx_real)\n",
+    "Byreal_masked = np.ma.masked_where(mask.data < 1,By_real)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "id": "8e2fe1bc-a979-4f85-b940-c4ef960d153e",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<matplotlib.image.AxesImage at 0x7fc43989fb20>"
+      ]
+     },
+     "execution_count": 23,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "fig, ax = plt.subplots(nrows=1, ncols = 2)\n",
+    "ax[0].imshow(Bxreal_masked, cmap ='gray')\n",
+    "ax[1].imshow(Byreal_masked, cmap ='gray')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 21,
+   "id": "7c49d9c9",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Bx =  0.21248667933551146\n",
+      "By =  -0.04872853541768957\n"
+     ]
+    }
+   ],
+   "source": [
+    "Bx_sum = sum(Bxreal_masked[mask == True].data)/Bxreal_masked[mask == True].data.shape\n",
+    "By_sum = sum(Byreal_masked[mask == True].data)/Byreal_masked[mask == True].data.shape\n",
+    "print('Bx = ', Bx_sum[0])\n",
+    "print('By = ', By_sum[0])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "id": "3ca9af93",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(23952,)"
+      ]
+     },
+     "execution_count": 22,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "Bxreal_masked[mask == True].data.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "id": "85498254-12e2-4fb7-86b9-3cc379feae54",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "Bx_masked = np.ma.masked_where(mask.data < 1,Bx)\n",
+    "By_masked = np.ma.masked_where(mask.data < 1,By)\n",
+    "\n",
+    "x_elements = Bx_masked.shape[0]\n",
+    "y_elements = By_masked.shape[0]\n",
+    "X,Y = np.meshgrid(np.arange(0,x_elements),np.arange(0,y_elements))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 26,
+   "id": "39d5e8b4-30fd-4df3-8ca0-aa2e2528fd31",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(330.0, 180.0)"
+      ]
+     },
+     "execution_count": 26,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "image = under_focus_affined\n",
+    "#image = in_focus.data\n",
+    "fig, ax = plt.subplots(nrows = 1, ncols= 1)\n",
+    "ax.set_title('Phase of the electron')\n",
+    "ax.imshow(image, cmap='gray', \\\n",
+    "                 vmin=vmin_mul*np.mean(image), vmax=vmax_mul*np.mean(image))\n",
+    "Q=plt.quiver(X,Y,Bx_masked,By_masked, scale =75, color='g')\n",
+    "ax.set_xlim([300,400])\n",
+    "ax.set_ylim([330,180])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 27,
+   "id": "56590c3d-b4b0-468d-a48d-820d5a3a94e2",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def RGB_phase(phase,mag,mag_max):\n",
+    "    color = np.zeros([phase.shape[0],phase.shape[1],4])\n",
+    "    phase = phase+180 # to change the range from [-180, 180] to [0, 360]\n",
+    "    for i in range(0, phase.shape[0]):\n",
+    "        for j in range(0,phase.shape[1]):\n",
+    "            #print(phase)\n",
+    "            if 0 <= phase[i,j] <= 120:\n",
+    "                r = (1/120)*phase[i,j]\n",
+    "                g = (-1/120)*phase[i,j]+1\n",
+    "                b = 0\n",
+    "            elif 120 <= phase[i,j] <= 240:\n",
+    "                r = (-1/120)*(phase[i,j]-120)+1\n",
+    "                g = 0\n",
+    "                b = (1/120)*(phase[i,j]- 120)\n",
+    "            elif 240 <= phase[i,j] <= 360:\n",
+    "                r = 0\n",
+    "                g = (1/120)*(phase[i,j]- 240)\n",
+    "                b = (-1/120)*(phase[i,j]-240)+1\n",
+    "            else:\n",
+    "                r = 0\n",
+    "                g = 0\n",
+    "                b = 0\n",
+    "            if r ==0 and g == 0 and b == 0:\n",
+    "                color[i,j,:] = [r,g,b,0]\n",
+    "            else:\n",
+    "                color[i,j,:] = [r,g,b,3*mag[i,j]/mag_max]\n",
+    "            #color[i,j,:] = [r,g,b,1]\n",
+    "            #color[i,j,:] = [r,g,b,mag[i,j]]\n",
+    "            #color[i,j,:] = [r,g,b,5*mag[i,j]/mag_max]\n",
+    "    return(color)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 28,
+   "id": "46500bab-533f-475a-b7d4-3f25263e8a3a",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "B = np.sqrt(abs(Bx_masked.data**2+By_masked.data**2))\n",
+    "B_phase = np.arctan2(By, Bx) * 180 / np.pi\n",
+    "Bphase_masked = np.ma.masked_where(mask.data < 1,B_phase)\n",
+    "B_max =np.max(B[Bphase_masked.mask == False])\n",
+    "color =RGB_phase(Bphase_masked, B, B_max)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 29,
+   "id": "aa6e9f10-4c7b-4db4-89ae-b6aa502a4c25",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "WARNING:matplotlib.image:Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers).\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "Text(0.5, 1.0, 'Magnetic field')"
+      ]
+     },
+     "execution_count": 29,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "angle = -5\n",
+    "rotated_color = ndimage.rotate(color, angle)\n",
+    "rotated_infocus = ndimage.rotate(in_focus.data,angle)\n",
+    "rotated_Bx = ndimage.rotate(Bx, angle)\n",
+    "rotated_By = ndimage.rotate(By, angle)\n",
+    "rotated_diff = ndimage.rotate(under_focus_affined-in_focus_data,angle)\n",
+    "\n",
+    "fig, ax =plt.subplots(nrows=2, ncols =2)\n",
+    "xlim_min = 25\n",
+    "xlim_max = 500\n",
+    "ylim_min = 375\n",
+    "ylim_max = 170\n",
+    "vmn = -20\n",
+    "vmx = 20\n",
+    "\n",
+    "ax[0,0].imshow(rotated_diff,cmap ='gray')\n",
+    "ax[0,0].set_xlim([xlim_min,xlim_max])\n",
+    "ax[0,0].set_ylim([ylim_min,ylim_max])\n",
+    "ax[0,0].set_yticks([])\n",
+    "ax[0,0].set_xticks([])\n",
+    "ax[0,0].set_yticklabels([])\n",
+    "ax[0,0].set_xticklabels([])\n",
+    "ax[0,0].set_title('Difference',size =12)\n",
+    "\n",
+    "ax[0,1].imshow(rotated_Bx,cmap ='gray', vmin = vmn, vmax = vmx)\n",
+    "ax[0,1].set_xlim([xlim_min,xlim_max])\n",
+    "ax[0,1].set_ylim([ylim_min,ylim_max])\n",
+    "ax[0,1].set_yticks([])\n",
+    "ax[0,1].set_xticks([])\n",
+    "ax[0,1].set_yticklabels([])\n",
+    "ax[0,1].set_xticklabels([])\n",
+    "ax[0,1].set_title('Bx')\n",
+    "\n",
+    "ax[1,0].imshow(rotated_By,cmap ='gray', vmin = vmn, vmax = vmx)\n",
+    "ax[1,0].set_xlim([xlim_min,xlim_max])\n",
+    "ax[1,0].set_ylim([ylim_min,ylim_max])\n",
+    "ax[1,0].set_yticks([])\n",
+    "ax[1,0].set_xticks([])\n",
+    "ax[1,0].set_yticklabels([])\n",
+    "ax[1,0].set_xticklabels([])\n",
+    "ax[1,0].set_title('By')\n",
+    "\n",
+    "ax[1,1].imshow(rotated_infocus, cmap ='gray')\n",
+    "ax[1,1].imshow(rotated_color)\n",
+    "ax[1,1].set_xlim([xlim_min,xlim_max])\n",
+    "ax[1,1].set_ylim([ylim_min,ylim_max])\n",
+    "ax[1,1].set_yticks([])\n",
+    "ax[1,1].set_xticks([])\n",
+    "ax[1,1].set_yticklabels([])\n",
+    "ax[1,1].set_xticklabels([])\n",
+    "ax[1,1].set_title('Magnetic field')"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "3060dfc6",
+   "metadata": {},
+   "source": [
+    "# Unused code"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1f8c9520",
+   "metadata": {},
+   "source": [
+    "spin_X = B*np.cos(B_phase*np.pi/180)\n",
+    "spin_Y = B*np.sin(B_phase*np.pi/180)\n",
+    "spinX_masked = np.ma.masked_where(mask.data < 1,spin_X)\n",
+    "spinY_masked = np.ma.masked_where(mask.data < 1,spin_Y)\n",
+    "fig, ax =plt.subplots(nrows=1, ncols =1)\n",
+    "ax.imshow(under_focus_affined,cmap='gray',vmin=vmin_mul*np.mean(under_focus_affined), vmax = vmax_mul*np.mean(under_focus_affined))\n",
+    "Q=plt.quiver(X,Y,spinX_masked,spinY_masked, color='g', scale = 500)\n"
+   ]
+  },
+  {
+   "cell_type": "raw",
+   "id": "5479e31e",
+   "metadata": {},
+   "source": [
+    "fig, ax =plt.subplots(nrows=1, ncols =1)\n",
+    "ax.imshow(phi_crop,cmap='gray',vmin=vmin_mul*np.mean(phi_crop), vmax = vmax_mul*np.mean(phi_crop))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8c8b429e",
+   "metadata": {},
+   "source": [
+    "The following section contains the functions necessary for running the code above"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8fbcf2e9",
+   "metadata": {},
+   "source": [
+    "This function bins down the image to reduce the complexity of the transform. This function though useful is not necessary for the current program since I'm using the rebin function of hyperspy"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "b4d136db",
+   "metadata": {},
+   "source": [
+    "Calculates the X gradient and Y gradient of the image"
+   ]
+  },
+  {
+   "cell_type": "raw",
+   "id": "34378c5e",
+   "metadata": {},
+   "source": [
+    "def gradients(image,pixel_size):\n",
+    "    #pixel_size = 1\n",
+    "    dim = image.shape\n",
+    "    grad_X = np.zeros((dim[0],dim[1]))\n",
+    "    grad_Y = np.zeros((dim[0],dim[1]))\n",
+    "    for i in range (0,dim[0]-1):\n",
+    "        for j in range (0,dim[1]-1):\n",
+    "            grad_X[i,j] =(image[i,j+1]-image[i,j])/pixel_size\n",
+    "            grad_Y[i,j] =-(image[i+1,j]-image[i,j])/pixel_size\n",
+    "    \n",
+    "    return(grad_X,grad_Y)"
+   ]
+  },
+  {
+   "cell_type": "raw",
+   "id": "e842a208",
+   "metadata": {},
+   "source": [
+    "def delsquare(phase_map,pixel_size):\n",
+    "    dim = image.shape\n",
+    "    del_square = np.zeros((dim[0],dim[1]))\n",
+    "    for i in range (1,dim[0]-1):\n",
+    "        for j in range (1,dim[1]-1):\n",
+    "            del_square[i,j] = (1/pixel_size**2)*((phase_map[i,j+1]-2*phase_map[i,j]+phase_map[i,j-1]) \\\n",
+    "                                                  +(phase_map[i+1,j]-2*phase_map[i,j]+phase_map[i-1,j]))\n",
+    "    return(del_square)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "23a5334c",
+   "metadata": {},
+   "source": [
+    "# Iterative solution for correction for second part of eqn 12"
+   ]
+  },
+  {
+   "cell_type": "raw",
+   "id": "b09cd88a",
+   "metadata": {},
+   "source": [
+    "(grad_X_phi, grad_Y_phi) = gradients(phi_crop,pixel_dimensions)\n",
+    "(grad_X, grad_Y) = gradients(in_focus.data,pixel_dimensions)\n",
+    "new_kz_dz_logI = -(delsquare(phi_crop,pixel_dimensions)+ grad_X_phi*grad_X+ grad_Y_phi*grad_Y)\n",
+    "error = (grad_X_phi*grad_X+ grad_Y_phi*grad_Y)\n",
+    "\n",
+    "fft_dI = np.fft.fft2(new_kz_dz_logI)\n",
+    "fft_dI_shift = np.fft.fftshift(fft_dI)\n",
+    "    \n",
+    "phi_crop = abs(np.fft.ifft2(np.fft.ifftshift(fft_dI_shift/(k_perp**2))))"
+   ]
+  },
+  {
+   "cell_type": "raw",
+   "id": "f5fcb289",
+   "metadata": {},
+   "source": [
+    "for i in range(0,50):\n",
+    "    (grad_X_phi, grad_Y_phi) = gradients(phi_crop,pixel_dimensions)\n",
+    "    (grad_X, grad_Y) = gradients(in_focus.data,pixel_dimensions)\n",
+    "    new_kz_dz_logI = (delsquare(phi_crop,pixel_dimensions)+ grad_X_phi*grad_X+ grad_Y_phi*grad_Y)\n",
+    "    error = (grad_X_phi*grad_X+ grad_Y_phi*grad_Y)\n",
+    "    #print(error)\n",
+    "    \n",
+    "    fft_dI = np.fft.fft2(new_kz_dz_logI)\n",
+    "    fft_dI_shift = np.fft.fftshift(fft_dI)\n",
+    "    \n",
+    "    phi_crop = abs(np.fft.ifft2(np.fft.ifftshift(fft_dI_shift/(k_perp**2))))"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.9.7"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
